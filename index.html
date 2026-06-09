@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CICS Status</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #1a1a2e;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+    }
+
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .label-top {
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #555a7a;
+      font-weight: 600;
+    }
+
+    .traffic-light {
+      background: #0d0d1a;
+      border: 1px solid #2a2a4a;
+      border-radius: 16px;
+      padding: 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      box-shadow: 0 0 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.04);
+      position: relative;
+    }
+
+    .bulb {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      position: relative;
+      transition: all 0.6s ease;
+    }
+
+    .bulb.red {
+      background: radial-gradient(circle at 35% 35%, #ff6b6b, #cc0000);
+      box-shadow: 0 0 30px rgba(204, 0, 0, 0.8), 0 0 60px rgba(204, 0, 0, 0.4);
+    }
+
+    .bulb.red-off {
+      background: radial-gradient(circle at 35% 35%, #3a1a1a, #1a0a0a);
+      box-shadow: none;
+    }
+
+    .bulb.green {
+      background: radial-gradient(circle at 35% 35%, #69ff84, #00aa44);
+      box-shadow: 0 0 30px rgba(0, 170, 68, 0.8), 0 0 60px rgba(0, 170, 68, 0.4);
+    }
+
+    .bulb.green-off {
+      background: radial-gradient(circle at 35% 35%, #0d2a1a, #071508);
+      box-shadow: none;
+    }
+
+    .status-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .status-text {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      transition: color 0.6s ease;
+    }
+
+    .status-text.ko  { color: #ff4444; }
+    .status-text.ok  { color: #00cc55; }
+
+    .detail {
+      font-size: 10px;
+      color: #444466;
+      text-align: center;
+      line-height: 1.6;
+      letter-spacing: 0.05em;
+      max-width: 160px;
+    }
+
+    .time-display {
+      font-size: 11px;
+      color: #33335a;
+      letter-spacing: 0.1em;
+    }
+
+    .window-badge {
+      font-size: 9px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 700;
+      margin-top: 2px;
+      transition: all 0.6s ease;
+    }
+
+    .window-badge.active {
+      background: rgba(204, 0, 0, 0.2);
+      color: #ff6666;
+      border: 1px solid rgba(204,0,0,0.3);
+    }
+
+    .window-badge.inactive {
+      background: rgba(0, 170, 68, 0.1);
+      color: #00aa44;
+      border: 1px solid rgba(0, 170, 68, 0.2);
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="label-top">CICS · Mainframe</div>
+
+  <div class="traffic-light">
+    <div class="bulb" id="bulb-red"></div>
+    <div class="bulb" id="bulb-green"></div>
+  </div>
+
+  <div class="status-block">
+    <div class="status-text" id="status-text">—</div>
+    <div class="window-badge" id="window-badge">—</div>
+    <div class="detail" id="detail-text">—</div>
+    <div class="time-display" id="time-display">—</div>
+  </div>
+</div>
+
+<script>
+  // ─── Finestre di chiusura CICS ───────────────────────────────────────────
+  // Ogni finestra: { days, start: [HH,MM], end: [HH,MM], label }
+  // days: array di giorni della settimana (0=Dom, 1=Lun, …, 6=Sab)
+  //       null = tutti i giorni
+  // Le finestre che attraversano mezzanotte vengono gestite come due mezze-finestre
+
+  const WINDOWS = [
+    // Chiusura ~mezzanotte: 23:58 → 00:05 (tutti i giorni eccetto Lun→Mar, cioè eccetto dom notte)
+    // Gestiamo come: se il giorno corrente NON è Lunedì (giorno 1), la finestra esiste
+    {
+      id: "midnight-pre",
+      excludeDays: [1],           // escludi Lunedì (la notte Lun→Mar non ha questa)
+      start: [23, 58],
+      end:   [23, 59, 59],        // fino a fine giornata
+      crossMidnight: true,
+      label: "Chiusura mezzanotte (parte 1)"
+    },
+    {
+      id: "midnight-post",
+      excludeDays: [2],           // escludi Martedì (la notte Lun→Mar non ha questa)
+      start: [0, 0],
+      end:   [0, 5],
+      crossMidnight: false,
+      label: "Chiusura mezzanotte (parte 2)"
+    },
+
+    // Chiusura ~02:00 tutti i giorni eccetto notte Lun→Mar
+    {
+      id: "early-standard",
+      excludeDays: [2],           // escludi Martedì (la notte Lun→Mar ha finestra estesa)
+      start: [1, 59],
+      end:   [2, 5],
+      label: "Chiusura 02:00 breve"
+    },
+
+    // Chiusura estesa notte Lun→Mar: 02:00 → 03:00 (quindi su Martedì)
+    {
+      id: "early-extended",
+      onlyDays: [2],              // solo Martedì (notte Lun→Mar)
+      start: [2, 0],
+      end:   [3, 0],
+      label: "Chiusura estesa (notte Lun→Mar)"
+    },
+
+    // Chiusura mezzanotte notte Lun→Mar: 23:57 → 00:02
+    // su Lunedì per la parte pre-mezzanotte
+    {
+      id: "midnight-mon-pre",
+      onlyDays: [1],
+      start: [23, 57],
+      end:   [23, 59, 59],
+      crossMidnight: true,
+      label: "Chiusura mezzanotte Lun→Mar (parte 1)"
+    },
+    // su Martedì per la parte post-mezzanotte
+    {
+      id: "midnight-mon-post",
+      onlyDays: [2],
+      start: [0, 0],
+      end:   [0, 2],
+      label: "Chiusura mezzanotte Lun→Mar (parte 2)"
+    },
+  ];
+
+  function toMinutes(h, m) { return h * 60 + m; }
+
+  function isClosed(now) {
+    const day  = now.getDay();
+    const mins = toMinutes(now.getHours(), now.getMinutes());
+
+    for (const w of WINDOWS) {
+      if (w.onlyDays  && !w.onlyDays.includes(day))   continue;
+      if (w.excludeDays && w.excludeDays.includes(day)) continue;
+
+      const startMins = toMinutes(w.start[0], w.start[1]);
+      const endMins   = toMinutes(w.end[0],   w.end[1]);
+
+      if (mins >= startMins && mins <= endMins) return { closed: true, window: w };
+    }
+    return { closed: false, window: null };
+  }
+
+  function nextWindow(now) {
+    // Trova la prossima finestra nelle prossime 24 ore
+    let nearest = null;
+    let minDiff = Infinity;
+    const currentMins = toMinutes(now.getHours(), now.getMinutes());
+
+    for (const w of WINDOWS) {
+      const startMins = toMinutes(w.start[0], w.start[1]);
+      let diff = startMins - currentMins;
+      if (diff < 0) diff += 1440; // giorno successivo
+      if (diff < minDiff) { minDiff = diff; nearest = w; }
+    }
+    const h = Math.floor(minDiff / 60);
+    const m = minDiff % 60;
+    return { window: nearest, inHours: h, inMins: m };
+  }
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+
+  function update() {
+    const now    = new Date();
+    const { closed, window: activeWindow } = isClosed(now);
+
+    const bulbRed   = document.getElementById('bulb-red');
+    const bulbGreen = document.getElementById('bulb-green');
+    const statusTxt = document.getElementById('status-text');
+    const badge     = document.getElementById('window-badge');
+    const detail    = document.getElementById('detail-text');
+    const timeDisp  = document.getElementById('time-display');
+
+    const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    timeDisp.textContent = timeStr;
+
+    if (closed) {
+      bulbRed.className   = 'bulb red';
+      bulbGreen.className = 'bulb green-off';
+      statusTxt.className = 'status-text ko';
+      statusTxt.textContent = 'CICS CHIUSO';
+      badge.className = 'window-badge active';
+      badge.textContent = '⚠ Manutenzione';
+      detail.textContent = activeWindow ? activeWindow.label : 'Finestra di chiusura attiva';
+    } else {
+      bulbRed.className   = 'bulb red-off';
+      bulbGreen.className = 'bulb green';
+      statusTxt.className = 'status-text ok';
+      statusTxt.textContent = 'CICS ATTIVO';
+      badge.className = 'window-badge inactive';
+      badge.textContent = '✓ Operativo';
+
+      const next = nextWindow(now);
+      if (next.inHours === 0 && next.inMins <= 15) {
+        detail.textContent = `Prossima chiusura tra ${next.inMins} min`;
+      } else if (next.inHours < 3) {
+        detail.textContent = `Prossima chiusura tra ${next.inHours}h ${next.inMins}m`;
+      } else {
+        detail.textContent = 'Nessuna chiusura imminente';
+      }
+    }
+  }
+
+  update();
+  setInterval(update, 5000); // aggiorna ogni 5 secondi
+</script>
+</body>
+</html>
